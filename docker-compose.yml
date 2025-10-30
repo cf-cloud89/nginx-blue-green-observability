@@ -23,21 +23,19 @@ services:
     networks:
       - app-network
 
-  nginx:
+  nginx_proxy:
     image: nginx:1.25.3-alpine
     container_name: nginx_proxy
     ports:
       - "8080:80"
     environment:
-      # Pass variables for the template script
       - PORT=${PORT}
       - ACTIVE_POOL=${ACTIVE_POOL}
     volumes:
-      # 1. Mount the local template to a path inside the container
       - ./nginx.conf.template:/etc/nginx/templates/default.conf.template
-      # 2. Mount the nginx-init script
       - ./nginx-init.sh:/nginx-init.sh
-      # 3. Override the default command to run the script
+      # Mount the shared log volume so Nginx can write to it
+      - nginx-logs:/var/log/nginx
     command: /bin/sh /nginx-init.sh
     networks:
       - app-network
@@ -45,6 +43,37 @@ services:
       - app_blue
       - app_green
 
+  alert_watcher:
+    # Use a lightweight Python image
+    image: python:3.9-slim-buster
+    container_name: alert_watcher
+    working_dir: /app
+    volumes:
+      # Mount the watcher script and requirements
+      - ./watcher.py:/app/watcher.py
+      - ./requirements.txt:/app/requirements.txt
+      # Mount the shared log volume (read-only)
+      - nginx-logs:/var/log/nginx:ro
+    # On start, install deps and run the watcher
+    command: sh -c "pip install -r requirements.txt && python watcher.py"
+    environment:
+      # Pass all our .env variables to the script
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - ACTIVE_POOL=${ACTIVE_POOL}
+      - ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD}
+      - WINDOW_SIZE=${WINDOW_SIZE}
+      - ALERT_COOLDOWN_SEC=${ALERT_COOLDOWN_SEC}
+      - MAINTENANCE_MODE=${MAINTENANCE_MODE}
+    networks:
+      - app-network
+    depends_on:
+      # Wait for Nginx to be running before starting
+      - nginx_proxy
+
 networks:
   app-network:
     driver: bridge
+
+# Define the named volume
+volumes:
+  nginx-logs:

@@ -4,6 +4,8 @@ This project demonstrates a Blue/Green deployment with auto-failover and manual 
 
 It's designed to run two identical application containers (blue and green) behind an Nginx reverse proxy. Nginx handles routing 100% of traffic to the primary pool and automatically failing over to the backup pool if the primary becomes unhealthy.
 
+## 1st Part: Blue/Green Deployment and Testing
+
 ## File Structure
 
 -   `docker-compose.yml`: Orchestrates the `nginx`, `app_blue`, and `app_green` services.
@@ -151,3 +153,66 @@ curl -i http://[YOUR_SERVER_IP]:8080/version
 ### Additional Note
 
 I included a Bash `test-script` file you can use to test the setup after installing the needed tools and setting everything up.
+
+---
+
+## 2nd Part: Observability & Alerting
+
+This setup includes a lightweight Python `alert_watcher` service that tails Nginx logs to provide real-time Slack alerts for failovers and high error rates.
+
+### New Setup Steps
+1.  **Get a Slack Webhook:** Follow the [official Slack guide](https://api.slack.com/messaging/webhooks) to create an "Incoming Webhook" URL.
+2.  **Create `.env`:** Copy `.env.example` to `.env`.
+3.  **Edit `.env`:** Paste your Slack Webhook URL into `SLACK_WEBHOOK_URL="..."`.
+
+### How to Test
+
+1.  **Start the System:**
+    ```sh
+    # This will now start 4 containers: blue, green, nginx, and the watcher
+    sudo docker compose up -d
+    ```
+
+2.  **Verify Nginx Logs:**
+    * First, send a test request: `curl http://[YOUR_SERVER_IP]:8080/version`
+    * Now, check the Nginx logs. You should see the new JSON format.
+    * ```sh
+        sudo docker logs nginx_proxy
+        ```
+    * Look for the `access_log` line at the very bottom. It will be a long JSON string. (You can also `cat` the file inside the watcher: `sudo docker exec alert_watcher cat /var/log/nginx/access.log`).
+
+3.  **Test 1: Failover Alert**
+    * **Induce Chaos:**
+        ```sh
+        curl -X POST http://[YOUR_SERVER_IP]:8081/chaos/start?mode=error
+        ```
+    * **Send a request:**
+        ```sh
+        curl http://[YOUR_SERVER_IP]:8080/version
+        ```
+    * **Check Slack:** Within seconds, you should receive a **"FAILOVER DETECTED"** alert.
+    * **Test Recovery:**
+        ```sh
+        curl -X POST http://[YOUR_SERVER_IP]:8081/chaos/stop
+        ```
+    * Wait ~5 seconds (for `fail_timeout` + buffer), then send another request:
+        ```sh
+        curl http://[YOUR_SERVER_IP]:8080/version
+        ```
+    * **Check Slack:** You should receive a **"RECOVERY"** alert.
+
+4.  **Test 2: High Error Rate Alert**
+    * This alert requires filling the 200-request window.
+    * **Induce Chaos (again):**
+        ```sh
+        curl -X POST http://[YOUR_SERVER_IP]:8081/chaos/start?mode=error
+        ```
+    * **Run this loop** from your terminal to quickly send > 200 requests. (This will take a few seconds):
+        ```sh
+        for i in {1..250}; do curl -s -o /dev/null http://[YOUR_SERVER_IP]:8080/; done
+        ```
+    * **Check Slack:** The watcher's log window is now full of 5xx errors. You should receive a **"High Error Rate"** alert.
+    * **Clean up:**
+        ```sh
+        curl -X POST http://[YOUR_SERVER_IP]:8081/chaos/stop
+        ```
