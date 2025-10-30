@@ -24,11 +24,17 @@ fi
 #    and create the final config file for Nginx to use.
 envsubst '$PORT $BLUE_STATUS $GREEN_STATUS' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
 
+# 3. Delete the /dev/stdout symlink that the nginx:alpine base image uses
+rm -f /var/log/nginx/access.log
+
+# 4. Create a new, REAL file for Nginx to write to
+touch /var/log/nginx/access.log
+
 echo "Nginx config generated:"
 cat /etc/nginx/conf.d/default.conf
 echo "------------------------"
 
-# 3. Start the Nginx server in the foreground.
+# 5. Start the Nginx server in the foreground.
 #    This is the main command that keeps the container running.
 echo "Starting Nginx..."
 nginx -g 'daemon off;'

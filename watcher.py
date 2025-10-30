@@ -4,7 +4,7 @@ import json
 import requests
 from collections import deque
 
-# -- 1. Load Configuration from Environment Variables
+# --- 1. Load Configuration from Environment Variables ---
 
 # Slack webhook URL (secret)
 SLACK_URL = os.getenv("SLACK_WEBHOOK_URL")
@@ -16,7 +16,7 @@ LOG_FILE = "/var/log/nginx/access.log"
 last_seen_pool = os.getenv("ACTIVE_POOL", "blue")
 
 # Alerting thresholds
-# It reads them as strings and convert to numbers
+# We read them as strings and convert to numbers
 try:
     ERROR_THRESHOLD = float(os.getenv("ERROR_RATE_THRESHOLD", 2))
     WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", 200))
@@ -29,7 +29,7 @@ except ValueError:
     COOLDOWN_SEC = 300
     MAINTENANCE_MODE = False
 
-# -- 2. State and Alerting Logic
+# --- 2. State and Alerting Logic ---
 
 # Rolling window for error rate calculation
 requests_window = deque(maxlen=WINDOW_SIZE)
@@ -37,7 +37,8 @@ requests_window = deque(maxlen=WINDOW_SIZE)
 # Cooldown to prevent alert spam
 last_alert_time = {
     "failover": 0,
-    "error_rate": 0
+    "error_rate": 0,
+    "recovery": 0  # <--- FIX 1: Add a separate cooldown timer for recovery
 }
 
 def send_slack_alert(message_type, message):
@@ -65,7 +66,7 @@ def send_slack_alert(message_type, message):
         # Format the Slack message
         payload = {
             "attachments": [{
-                "color": "#ff0000" if message_type == "error_rate" else "#ffaa00",
+                "color": "#ff0000" if message_type == "error_rate" else ("#00ff00" if message_type == "recovery" else "#ffaa00"),
                 "title": f" Nginx Alert: {message_type.replace('_', ' ').title()}",
                 "text": message,
                 "ts": current_time
@@ -83,21 +84,28 @@ def analyze_log_line(log_data):
     """
     global last_seen_pool, requests_window
 
-    # 1. Failover Detection
+    # --- 1. Failover Detection ---
     current_pool = log_data.get("pool")
     if current_pool and current_pool != last_seen_pool:
-        # A pool flip detected!
+        # We've detected a pool flip!
         alert_msg = f"Traffic has flipped from '{last_seen_pool}' to '{current_pool}'."
         if last_seen_pool == os.getenv("ACTIVE_POOL", "blue"):
             send_slack_alert("failover", f"FAILOVER DETECTED: {alert_msg}")
         else:
-            send_slack_alert("failover", f"RECOVERY: {alert_msg}")
+            # FIX 1: Use the "recovery" message_type so it bypasses the "failover" cooldown
+            send_slack_alert("recovery", f"RECOVERY: {alert_msg}")
         last_seen_pool = current_pool
 
-    # 2. Error Rate Detection
+    # --- 2. Error Rate Detection ---
+    
+    # FIX 2: Make this parsing logic safer to avoid crashes on 'None'
+    upstream_status_str = log_data.get("upstream_status") # Get value, might be None
+    
+    if not upstream_status_str:
+        upstream_status_str = "200" # Default to "200" if field is missing or null
+
     # $upstream_status can be "502, 200"
     # We only care about the first status, which is the primary attempt
-    upstream_status_str = log_data.get("upstream_status", "200")
     first_status = upstream_status_str.split(",")[0].strip() # "502" or "200"
 
     # Check if the status code is a 5xx server error
@@ -110,9 +118,7 @@ def analyze_log_line(log_data):
     if len(requests_window) == WINDOW_SIZE:
         error_count = sum(1 for is_error in requests_window if is_error)
         error_rate = (error_count / WINDOW_SIZE) * 100
-        
-        # print(f"DEBUG: Error rate: {error_rate:.2f}% ({error_count} errors in last {WINDOW_SIZE} reqs)")
-
+    
         if error_rate > ERROR_THRESHOLD:
             alert_msg = (
                 f"High upstream 5xx error rate detected: "

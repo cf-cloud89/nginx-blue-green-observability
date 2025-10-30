@@ -16,8 +16,8 @@ log_format json_logs escape=json
 
 upstream my_app {
     # Set aggressive timeouts for fast testing
-    server app_blue:${PORT}  ${BLUE_STATUS}  max_fails=1 fail_timeout=2s;
-    server app_green:${PORT} ${GREEN_STATUS} max_fails=1 fail_timeout=2s;
+    server app_blue:${PORT}  ${BLUE_STATUS}  max_fails=200 fail_timeout=2s;
+    server app_green:${PORT} ${GREEN_STATUS} max_fails=200 fail_timeout=2s;
 }
 
 server {
