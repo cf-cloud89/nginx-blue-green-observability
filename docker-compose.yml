@@ -1,0 +1,50 @@
+services:
+  app_blue:
+    image: ${BLUE_IMAGE}
+    container_name: app_blue
+    ports:
+      - "8081:${PORT}"
+    environment:
+      - PORT=${PORT}
+      - RELEASE_ID=${RELEASE_ID_BLUE}
+      - APP_POOL=blue
+    networks:
+      - app-network
+
+  app_green:
+    image: ${GREEN_IMAGE}
+    container_name: app_green
+    ports:
+      - "8082:${PORT}"
+    environment:
+      - PORT=${PORT}
+      - RELEASE_ID=${RELEASE_ID_GREEN}
+      - APP_POOL=green
+    networks:
+      - app-network
+
+  nginx:
+    image: nginx:1.25.3-alpine
+    container_name: nginx_proxy
+    ports:
+      - "8080:80"
+    environment:
+      # Pass variables for the template script
+      - PORT=${PORT}
+      - ACTIVE_POOL=${ACTIVE_POOL}
+    volumes:
+      # 1. Mount the local template to a path inside the container
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template
+      # 2. Mount the nginx-init script
+      - ./nginx-init.sh:/nginx-init.sh
+      # 3. Override the default command to run the script
+    command: /bin/sh /nginx-init.sh
+    networks:
+      - app-network
+    depends_on:
+      - app_blue
+      - app_green
+
+networks:
+  app-network:
+    driver: bridge
