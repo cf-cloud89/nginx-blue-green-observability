@@ -5,11 +5,17 @@ This setup includes a lightweight Python `alert_watcher` service that tails Ngin
 ## File Structure
 
 * **`docker-compose.yml`**: Defines and runs all four services: `app_blue`, `app_green`, `nginx_proxy`, and `alert_watcher`. It's responsible for orchestrating the network and the new `nginx-logs` shared volume.
+
 * **`nginx.conf.template`**: The Nginx configuration. It defines a custom JSON log format (`json_logs`) that captures detailed upstream data and writes it to the shared log file.
+
 * **`nginx-init.sh`**: The Nginx startup script. It deletes the default log *stream* and create a *real* `access.log` file, which is required for the Python script to be able to "tail" it.
+
 * **`watcher.py`**: The heart of the project. A Python "sidecar" script that runs in its own container, continuously reads the `access.log` file, and maintains the state of the system (current pool, error rate) to send alerts to Slack.
+
 * **`requirements.txt`**: Lists the single Python dependency (`requests`) needed by `watcher.py` to send HTTP POST requests to the Slack webhook.
+
 * **`.env.example`**: A template file that lists all required environment variables, including `SLACK_WEBHOOK_URL`, `ERROR_RATE_THRESHOLD`, and other watcher settings.
+
 * **`runbook.md`**: An operator's guide. It explains what each Slack alert means and provides clear, actionable steps for an engineer to take when a failover or error rate alert is received.
 
 ### Setup Steps
