@@ -4,11 +4,11 @@ import json
 import requests
 from collections import deque
 
-# --- 1. Load Configuration from Environment Variables ---
+# 1. Load Configuration from Environment Variables
 
 # Slack webhook URL (secret)
 SLACK_URL = os.getenv("SLACK_WEBHOOK_URL")
-# Path to the log file, set by our Docker volume
+# Path to the log file, set by the Docker volume
 LOG_FILE = "/var/log/nginx/access.log"
 
 # App state
@@ -16,7 +16,7 @@ LOG_FILE = "/var/log/nginx/access.log"
 last_seen_pool = os.getenv("ACTIVE_POOL", "blue")
 
 # Alerting thresholds
-# We read them as strings and convert to numbers
+# It read them as strings and convert to numbers
 try:
     ERROR_THRESHOLD = float(os.getenv("ERROR_RATE_THRESHOLD", 2))
     WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", 200))
@@ -29,7 +29,7 @@ except ValueError:
     COOLDOWN_SEC = 300
     MAINTENANCE_MODE = False
 
-# --- 2. State and Alerting Logic ---
+# 2. State and Alerting Logic
 
 # Rolling window for error rate calculation
 requests_window = deque(maxlen=WINDOW_SIZE)
@@ -38,7 +38,7 @@ requests_window = deque(maxlen=WINDOW_SIZE)
 last_alert_time = {
     "failover": 0,
     "error_rate": 0,
-    "recovery": 0  # <--- FIX 1: Add a separate cooldown timer for recovery
+    "recovery": 0
 }
 
 def send_slack_alert(message_type, message):
@@ -53,7 +53,7 @@ def send_slack_alert(message_type, message):
 
     current_time = time.time()
     
-    # Check if we are in a cooldown period for this alert type
+    # Check if it's in a cooldown period for this alert type
     if current_time - last_alert_time[message_type] < COOLDOWN_SEC:
         print(f"COOLDOWN: Suppressed alert for {message_type}")
         return
@@ -84,46 +84,59 @@ def analyze_log_line(log_data):
     """
     global last_seen_pool, requests_window
 
-    # --- 1. Failover Detection ---
+    # -- Failover Detection --
     current_pool = log_data.get("pool")
     if current_pool and current_pool != last_seen_pool:
-        # We've detected a pool flip!
-        alert_msg = f"Traffic has flipped from '{last_seen_pool}' to '{current_pool}'."
+        # A pool flip has been detected!
+        
         if last_seen_pool == os.getenv("ACTIVE_POOL", "blue"):
+            # This is the FAILOVER message
+            alert_msg = (
+                f"Traffic has flipped from **'{last_seen_pool}'** to **'{current_pool}'**.\n\n"
+                f"*Action:* The primary pool (`{last_seen_pool}`) has failed. "
+                f"Check its logs (`docker logs app_{last_seen_pool}`) to investigate."
+            )
             send_slack_alert("failover", f"FAILOVER DETECTED: {alert_msg}")
         else:
-            # FIX 1: Use the "recovery" message_type so it bypasses the "failover" cooldown
+            # This is the RECOVERY message
+            alert_msg = (
+                f"Traffic has flipped from **'{last_seen_pool}'** back to **'{current_pool}'**.\n\n"
+                f"*Action:* This is a recovery notification. "
+                f"The primary pool (`{current_pool}`) is healthy again and serving traffic."
+            )
             send_slack_alert("recovery", f"RECOVERY: {alert_msg}")
+        
         last_seen_pool = current_pool
 
-    # --- 2. Error Rate Detection ---
+    # 2. Error Rate Detection
     
-    # FIX 2: Make this parsing logic safer to avoid crashes on 'None'
     upstream_status_str = log_data.get("upstream_status") # Get value, might be None
     
     if not upstream_status_str:
         upstream_status_str = "200" # Default to "200" if field is missing or null
 
     # $upstream_status can be "502, 200"
-    # We only care about the first status, which is the primary attempt
     first_status = upstream_status_str.split(",")[0].strip() # "502" or "200"
 
     # Check if the status code is a 5xx server error
     is_5xx_error = first_status.startswith("5")
     
-    # Add to our rolling window
+    # Add to the rolling window
     requests_window.append(is_5xx_error)
 
     # Only calculate if the window is full
     if len(requests_window) == WINDOW_SIZE:
         error_count = sum(1 for is_error in requests_window if is_error)
         error_rate = (error_count / WINDOW_SIZE) * 100
-    
+
         if error_rate > ERROR_THRESHOLD:
+            # This is the ERROR RATE message
             alert_msg = (
                 f"High upstream 5xx error rate detected: "
                 f"**{error_rate:.2f}%** over the last {WINDOW_SIZE} requests "
-                f"(Threshold: {ERROR_THRESHOLD}%)."
+                f"(Threshold: {ERROR_THRESHOLD}%).\n\n"
+                f"*Action:* The application (`app_{last_seen_pool}`) is failing but not crashing. "
+                f"This is likely an application bug. Check its logs (`docker logs app_{last_seen_pool}`) for exceptions."
             )
             send_slack_alert("error_rate", alert_msg)
 
@@ -165,3 +178,4 @@ if __name__ == "__main__":
         print("--- WARNING: SLACK_WEBHOOK_URL is not set. Will print alerts to console. ---")
 
     tail_log_file()
+    

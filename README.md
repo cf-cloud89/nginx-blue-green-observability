@@ -1,24 +1,29 @@
-# Blue/Green Deployment with Nginx
+# Blue/Green Deployment with Nginx (Observability & Alerting)
 
-This project demonstrates a Blue/Green deployment with auto-failover and manual toggling using Nginx and Docker Compose.
-
-It's designed to run two identical application containers (blue and green) behind an Nginx reverse proxy. Nginx handles routing 100% of traffic to the primary pool and automatically failing over to the backup pool if the primary becomes unhealthy.
-
-## 1st Part: Blue/Green Deployment and Testing
+This setup includes a lightweight Python `alert_watcher` service that tails Nginx logs to provide real-time Slack alerts for failovers and high error rates.
 
 ## File Structure
 
--   `docker-compose.yml`: Orchestrates the `nginx`, `app_blue`, and `app_green` services.
--   `nginx.conf.template`: Nginx config template. Variables (`${...}`) are injected by the init script.
--   `nginx-init.sh`: The script that runs in the Nginx container to generate the final config from the template.
--   `.env.example`: Provides example environment variables.
--   `README.md`: This file.
+* **`docker-compose.yml`**: Defines and runs all four services: `app_blue`, `app_green`, `nginx_proxy`, and `alert_watcher`. It's responsible for orchestrating the network and the new `nginx-logs` shared volume.
+* **`nginx.conf.template`**: The Nginx configuration. It defines a custom JSON log format (`json_logs`) that captures detailed upstream data and writes it to the shared log file.
+* **`nginx-init.sh`**: The Nginx startup script. It deletes the default log *stream* and create a *real* `access.log` file, which is required for the Python script to be able to "tail" it.
+* **`watcher.py`**: The heart of the project. A Python "sidecar" script that runs in its own container, continuously reads the `access.log` file, and maintains the state of the system (current pool, error rate) to send alerts to Slack.
+* **`requirements.txt`**: Lists the single Python dependency (`requests`) needed by `watcher.py` to send HTTP POST requests to the Slack webhook.
+* **`.env.example`**: A template file that lists all required environment variables, including `SLACK_WEBHOOK_URL`, `ERROR_RATE_THRESHOLD`, and other watcher settings.
+* **`runbook.md`**: An operator's guide. It explains what each Slack alert means and provides clear, actionable steps for an engineer to take when a failover or error rate alert is received.
 
-## How to Run
+### Setup Steps
 
 These instructions assume you are running on a remote cloud server (e.g., AWS EC2).
 
-1.  **Install Git, Docker, and Docker Compose**
+1.  **SSH into the Cloud Server and Clone the Repository**
+    ```sh
+    ssh -i ~/.ssh/[your-key-pair] username@[YOUR-IP-ADDRESS/HOSTNAME]
+    git clone https://github.com/cf-cloud89/nginx-blue-green-observability.git
+    cd your-repo-name
+    ```
+
+2.  **Install Git, Docker, and Docker Compose**
     You must have Docker and Docker Compose installed. On modern Linux systems, this is often installed as a Docker plugin.
     * Follow the [official Docker install instructions](https://docs.docker.com/engine/install/) for your Linux distribution.
     * Ensure you install the `docker-compose-plugin` (or `docker compose`).
@@ -28,39 +33,29 @@ These instructions assume you are running on a remote cloud server (e.g., AWS EC
         ```
     * **Important:** You must log out and log back in for this change to take effect.
 
-2.  **Clone the Repository**
-    ```sh
-    git clone https://github.com/cf-cloud89/blue-green-deployment-with-nginx.git
-    cd your-repo-name
-    ```
+3.  **Get a Slack Webhook:** Follow the [official Slack guide](https://api.slack.com/messaging/webhooks) to create an "Incoming Webhook" URL.
 
-3.  **Prepare Environment File**
-    Copy the example `.env` file. You **must** edit this file to add your container image URLs for `BLUE_IMAGE` and `GREEN_IMAGE`.
+4.  **Create `.env`:** Copy `.env.example` to `.env`.
 
-    ```sh
-    cp .env.example .env
-    nano .env
-    ```
+5.  **Edit `.env`:** Paste your Slack Webhook URL into `SLACK_WEBHOOK_URL="..."`.
 
-4.  **Make Init Script Executable**
+6.  **Make Init Script Executable:**
     The `nginx-init.sh` script must have execute permissions to run inside the container.
 
     ```sh
     chmod +x nginx-init.sh
     ```
 
-5.  **Start Services**
-    Run Docker Compose in detached (`-d`) mode. (Use `sudo` if you skipped step 1).
+### How to Test
 
+1.  **Start the System:**
+    * This will start 4 containers: blue, green, nginx, and the watcher
+    * Run Docker Compose in detached (`-d`) mode. (Use `sudo` if you didn't add your user to the `docker` group in no2 of the **Setup Steps**).
     ```sh
-    docker compose up -d
+    sudo docker compose up -d
     ```
 
-## How to Test
-
-These tests should be run from your **local computer's terminal**, *not* from inside the cloud server.
-
-### **Firewall Prerequisite**
+2.  **Firewall Prerequisite**
 Before you can test, you must **open ports** in your cloud provider's firewall (e.g., AWS Security Group, GCP Firewall).
 
 You need to allow inbound TCP traffic on the following ports:
@@ -68,112 +63,7 @@ You need to allow inbound TCP traffic on the following ports:
 * `8081` (for the Blue app's chaos endpoint)
 * `8082` (for the Green app's chaos endpoint)
 
-### **Setup**
-Find your server's **Public IP Address** and use it in place of `[YOUR_SERVER_IP]` in all the commands below.
-
----
-
-### 1. Test Baseline (Blue Active)
-
-**Setup:** Ensure `ACTIVE_POOL=blue` in your `.env` file on the server and run `docker compose up -d`.
-
-**Action:** Send a request to the Nginx proxy from your local machine.
-
-```sh
-curl -i http://[YOUR_SERVER_IP]:8080/version
-```
-**Expected Output:** You should see a `200 OK` response, and the headers will include `X-App-Pool: blue`.
-
----
-
-### 2. Test Auto-Failover (Blue -&gt; Green)
-
-1.  **Induce Chaos on Blue:** Send a `POST` request *directly* to the Blue app's exposed port (`8081`) to tell it to start failing.
-
-    ```sh
-    # Tell Blue app to start returning 500 errors
-    curl -X POST http://[YOUR_SERVER_IP]:8081/chaos/start?mode=error
-    ```
-
-2.  **Test Nginx Proxy:** Immediately send a request to the main Nginx proxy (`8080`).
-
-    ```sh
-    curl -i http://[YOUR_SERVER_IP]:8080/version
-    ```
-**Expected Output:** You should get a `200 OK` response (no error!) and see the header `X-App-Pool: green`. Nginx detected the failure on Blue and automatically retried the request on the Green server.
-
----
-
-### 3. Test Auto-Recovery (Green -&gt; Blue)
-
-1.  **Stop Chaos on Blue:** Tell the Blue app to become healthy again.
-
-    ```sh
-    curl -X POST http://[YOUR_SERVER_IP]:8081/chaos/stop
-    ```
-
-2.  **Wait for `fail_timeout`:** Wait about 10-15 seconds. (This allows the `fail_timeout=10s` set in the Nginx config to expire).
-
-3.  **Test Nginx Proxy:** Send another request to the proxy.
-
-    ```sh
-    curl -i http://[YOUR_SERVER_IP]:8080/version
-    ```
-**Expected Output:** The response should now come from `X-App-Pool: blue`. Nginx has automatically detected that the primary server is healthy again and has routed traffic back.
-
----
-
-### 4. Test Manual Toggle (Blue -&gt; Green)
-
-1.  **Stop the services (on the server):**
-    ```sh
-    # SSH into your server
-    docker compose down
-    ```
-
-2.  **Edit `.env` file (on the server):**
-    Change `ACTIVE_POOL=blue` to `ACTIVE_POOL=green`.
-    ```sh
-    nano .env
-    ```
-
-3.  **Start services (on the server):**
-    ```sh
-    docker compose up -d
-    ```
-
-4.  **Test the proxy (from your local machine):**
-    ```sh
-    curl -i http://[YOUR_SERVER_IP]:8080/version
-    ```
-**Expected Output:** All traffic should now go directly to Green (`X-App-Pool: green`), and Blue (`X-App-Pool: blue`) will now be serving as the backup.
-
----
-
-### Additional Note
-
-I included a Bash `test-script` file you can use to test the setup after installing the needed tools and setting everything up.
-
----
-
-## 2nd Part: Observability & Alerting
-
-This setup includes a lightweight Python `alert_watcher` service that tails Nginx logs to provide real-time Slack alerts for failovers and high error rates.
-
-### New Setup Steps
-1.  **Get a Slack Webhook:** Follow the [official Slack guide](https://api.slack.com/messaging/webhooks) to create an "Incoming Webhook" URL.
-2.  **Create `.env`:** Copy `.env.example` to `.env`.
-3.  **Edit `.env`:** Paste your Slack Webhook URL into `SLACK_WEBHOOK_URL="..."`.
-
-### How to Test
-
-1.  **Start the System:**
-    ```sh
-    # This will now start 4 containers: blue, green, nginx, and the watcher
-    sudo docker compose up -d
-    ```
-
-2.  **Verify Nginx Logs:**
+3.  **Verify Nginx Logs:**
     * First, send a test request: `curl http://[YOUR_SERVER_IP]:8080/version`
     * Now, check the Nginx logs. You should see the new JSON format.
     * ```sh
@@ -181,7 +71,7 @@ This setup includes a lightweight Python `alert_watcher` service that tails Ngin
         ```
     * Look for the `access_log` line at the very bottom. It will be a long JSON string. (You can also `cat` the file inside the watcher: `sudo docker exec alert_watcher cat /var/log/nginx/access.log`).
 
-3.  **Test 1: Failover Alert**
+4.  **Test 1: Failover Alert**
     * **Induce Chaos:**
         ```sh
         curl -X POST http://[YOUR_SERVER_IP]:8081/chaos/start?mode=error
@@ -201,7 +91,7 @@ This setup includes a lightweight Python `alert_watcher` service that tails Ngin
         ```
     * **Check Slack:** You should receive a **"RECOVERY"** alert.
 
-4.  **Test 2: High Error Rate Alert**
+5.  **Test 2: High Error Rate Alert**
     * This alert requires filling the 200-request window.
     * **Induce Chaos (again):**
         ```sh
